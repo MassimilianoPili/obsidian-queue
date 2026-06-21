@@ -1,0 +1,9 @@
+{
+  "spec": "Demo: API REST utenti con auth JWT",
+  "tasks": [
+    { "taskKey": "CT-001", "title": "Contesto codebase", "workerType": "CONTEXT_MANAGER" },
+    { "taskKey": "BE-001", "title": "Implementa endpoint utenti", "workerType": "BE", "dependsOn": ["CT-001"] },
+    { "taskKey": "BE-002", "title": "Auth JWT", "workerType": "BE", "dependsOn": ["CT-001"] },
+    { "taskKey": "RV-001", "title": "Review finale", "workerType": "REVIEW", "dependsOn": ["BE-001", "BE-002"], "requireApproval": true }
+  ]
+}

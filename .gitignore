@@ -1,0 +1,14 @@
+node_modules/
+main.js
+*.js.map
+data.json
+
+# database SQLite locale (stato runtime, non va versionato)
+*.db
+*.db-wal
+*.db-shm
+
+# artefatti di test temporanei
+_*.cjs
+_*.mjs
+_*.db*

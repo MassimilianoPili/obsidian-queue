@@ -1,0 +1,65 @@
+.agent-tasks-root {
+  padding: 8px;
+  overflow: auto;
+}
+.at-toolbar {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.at-board {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+.at-col {
+  flex: 1 1 0;
+  min-width: 140px;
+  background: var(--background-secondary);
+  border-radius: 6px;
+  padding: 6px;
+}
+.at-col h4 {
+  margin: 2px 0 8px;
+  font-size: 12px;
+  text-transform: uppercase;
+  opacity: 0.7;
+}
+.at-card {
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  margin-bottom: 6px;
+}
+.at-key {
+  font-size: 11px;
+  opacity: 0.65;
+}
+.at-title {
+  font-weight: 600;
+  font-size: 13px;
+  margin: 2px 0;
+}
+.at-meta {
+  font-size: 11px;
+  opacity: 0.6;
+}
+.at-error {
+  font-size: 11px;
+  color: var(--text-error);
+  margin-top: 2px;
+}
+.at-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+}
+.at-actions button {
+  font-size: 11px;
+  padding: 2px 8px;
+}
+.at-dag {
+  margin-top: 12px;
+}
