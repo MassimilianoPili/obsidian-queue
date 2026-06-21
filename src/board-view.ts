@@ -98,8 +98,13 @@ export class TasksBoardView extends ItemView {
     card.createEl("div", { cls: "at-title", text: t.title || "(senza titolo)" });
     const meta = card.createDiv({ cls: "at-meta" });
     if (t.worker) meta.createSpan({ text: `worker: ${t.worker}` });
-    if (t.attempts) meta.createSpan({ text: ` · tent: ${t.attempts}` });
+    if (t.attempts) meta.createSpan({ text: ` · tent: ${t.attempts}/${t.max_attempts ?? "?"}` });
     if (t.process_score != null) meta.createSpan({ text: ` · score: ${t.process_score}` });
+    // countdown del backoff per i retry programmati
+    if (t.next_eligible_at) {
+      const inS = t.next_eligible_at - Math.floor(Date.now() / 1000);
+      if (inS > 0) meta.createSpan({ text: ` · retry tra ${inS}s` });
+    }
     if (t.error) card.createEl("div", { cls: "at-error", text: t.error });
 
     const actions = card.createDiv({ cls: "at-actions" });
@@ -112,11 +117,12 @@ export class TasksBoardView extends ItemView {
         new Notice(`Errore: ${String((e as Error).message)}`);
       }
     };
-    if (t.status === "AWAITING_APPROVAL") {
+    const sm = this.plugin.config.stateMachine;
+    if (t.status === sm.approvalState) {
       actions.createEl("button", { text: "Approva" }).onclick = () => act(() => this.plugin.svc.approve(t.id), "approvato");
       actions.createEl("button", { text: "Rifiuta" }).onclick = () => act(() => this.plugin.svc.reject(t.id), "rifiutato");
     }
-    if (t.status === "FAILED") {
+    if (t.status === sm.failureState || t.status === sm.deadLetterState) {
       actions.createEl("button", { text: "Riprova" }).onclick = () => act(() => this.plugin.svc.retry(t.id), "in coda");
     }
   }

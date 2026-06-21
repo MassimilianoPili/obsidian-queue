@@ -28,6 +28,7 @@ const DEFAULTS = {
       { status: "DISPATCHED", label: "In corso" },
       { status: "DONE", label: "Completati" },
       { status: "FAILED", label: "Falliti" },
+      { status: "DEAD_LETTER", label: "Dead-letter" },
     ],
   },
   stateMachine: {
@@ -37,12 +38,14 @@ const DEFAULTS = {
     dispatchedState: "DISPATCHED",
     successState: "DONE",
     failureState: "FAILED",
-    terminalStates: ["DONE", "FAILED"],
+    deadLetterState: "DEAD_LETTER", // tentativi esauriti → terminale, redrive manuale
+    terminalStates: ["DONE", "FAILED", "DEAD_LETTER"],
     transitions: {
       WAITING: ["DISPATCHED"],
-      DISPATCHED: ["DONE", "FAILED", "WAITING"],
+      DISPATCHED: ["DONE", "WAITING", "FAILED", "DEAD_LETTER"], // WAITING = auto-retry con backoff
       AWAITING_APPROVAL: ["WAITING", "FAILED"],
-      FAILED: ["WAITING"],
+      FAILED: ["WAITING"], // retry manuale
+      DEAD_LETTER: ["WAITING"], // redrive manuale
       DONE: [],
     },
   },
@@ -53,7 +56,16 @@ const DEFAULTS = {
     { field: "priority", dir: "ASC" },
     { field: "ordinal", dir: "ASC" },
   ],
-  defaults: { visibilityTimeoutS: 300, priority: 5, maxAttempts: 3 },
+  defaults: {
+    visibilityTimeoutS: 300, // lease del claim
+    priority: 5,
+    maxAttempts: 3,
+    retryBaseS: 5, // backoff esponenziale: base * 2^(attempt-1)
+    retryCapS: 600, // cap del backoff
+    retryJitterFrac: 0.25, // jitter ∈ [1-frac, 1] (mai negativo)
+    enforceLease: true, // fencing: complete/heartbeat richiedono il lease_id del claim
+    reaperIntervalS: 5, // ogni quanto il servizio fa lo sweep dei DISPATCHED scaduti
+  },
 };
 
 // campi ammessi nell'ORDER BY (no input grezzo in SQL)
@@ -87,6 +99,7 @@ function validateConfig(c) {
   ["initial", "approvalState", "claimableState", "dispatchedState", "successState", "failureState"].forEach((k) =>
     assertState(sm[k], `stateMachine.${k}`),
   );
+  if (sm.deadLetterState) assertState(sm.deadLetterState, "stateMachine.deadLetterState");
   (sm.terminalStates || []).forEach((s) => assertState(s, "terminalStates"));
   for (const [from, tos] of Object.entries(sm.transitions || {})) {
     assertState(from, "transitions.from");
@@ -126,6 +139,15 @@ function mermaidLabel(v) {
 function mermaidId(v) {
   return str(v, 40).replace(/[^A-Za-z0-9_]/g, "_") || "n";
 }
+// backoff esponenziale con jitter non-negativo: delay = min(base*2^(att-1), cap), poi *[1-frac, 1]
+function backoffSeconds(attempt, d) {
+  const base = d.retryBaseS ?? 5;
+  const cap = d.retryCapS ?? 600;
+  const frac = d.retryJitterFrac ?? 0.25;
+  const delay = Math.min(cap, base * Math.pow(2, Math.max(0, attempt - 1)));
+  const jittered = delay * (1 - frac * Math.random()); // ∈ (delay*(1-frac), delay], mai nel passato
+  return Math.max(1, Math.round(jittered));
+}
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS plans (
@@ -153,6 +175,8 @@ CREATE TABLE IF NOT EXISTS plan_items (
   attempts INTEGER NOT NULL DEFAULT 0,
   max_attempts INTEGER NOT NULL DEFAULT 3,
   claim_expires_at INTEGER,
+  next_eligible_at INTEGER,
+  lease_id TEXT,
   review_score REAL,
   process_score REAL,
   aggregated_reward REAL,
@@ -189,6 +213,12 @@ function createStore(dbPath, config = DEFAULTS) {
   db.exec("PRAGMA journal_mode = WAL;");
   db.exec("PRAGMA foreign_keys = ON;");
   db.exec(SCHEMA);
+  // migration idempotente per DB pre-esistenti: aggiungi le colonne nuove se mancano
+  {
+    const cols = new Set(db.prepare("PRAGMA table_info(plan_items)").all().map((c) => c.name));
+    if (!cols.has("next_eligible_at")) db.exec("ALTER TABLE plan_items ADD COLUMN next_eligible_at INTEGER");
+    if (!cols.has("lease_id")) db.exec("ALTER TABLE plan_items ADD COLUMN lease_id TEXT");
+  }
   // indice parziale sugli item claimabili: il nome stato è validato (STATE_RE) → safe nell'SQL
   db.exec(
     `CREATE INDEX IF NOT EXISTS idx_items_claimable ON plan_items(plan_id, priority, ordinal) WHERE status = '${SM.claimableState}';`,
@@ -226,7 +256,9 @@ function createStore(dbPath, config = DEFAULTS) {
     return true;
   }
 
-  const UPDATABLE = new Set(["worker", "attempts", "claim_expires_at", "result", "error", "process_score"]);
+  const UPDATABLE = new Set([
+    "worker", "attempts", "claim_expires_at", "next_eligible_at", "lease_id", "result", "error", "process_score",
+  ]);
   function setItemStatus(item, next, extra = {}) {
     const allowed = TRANSITIONS[item.status] || [];
     if (!allowed.includes(next)) {
@@ -247,7 +279,8 @@ function createStore(dbPath, config = DEFAULTS) {
     const items = stmt.itemsByPlan.all(planId);
     if (items.length === 0) return;
     if (!items.every((i) => TERMINAL.has(i.status))) return;
-    const failed = items.filter((i) => i.status === SM.failureState).length;
+    // un task FAILED o DEAD_LETTER rende il piano FAILED
+    const failed = items.filter((i) => i.status === SM.failureState || i.status === SM.deadLetterState).length;
     const status = failed > 0 ? PS.failed : PS.completed;
     stmt.setPlanStatus.run(status, now(), planId);
     emit(planId, null, "PLAN_COMPLETED", { status, itemCount: items.length, failedCount: failed });
@@ -315,17 +348,22 @@ function createStore(dbPath, config = DEFAULTS) {
 
     claimNext({ worker, planId } = {}) {
       api.sweepExpired();
-      let sql = "SELECT * FROM plan_items WHERE status=?";
-      const vals = [SM.claimableState];
+      const t = now();
+      // claimabile = stato claimable E backoff scaduto (next_eligible_at nullo o passato)
+      let sql = "SELECT * FROM plan_items WHERE status=? AND (next_eligible_at IS NULL OR next_eligible_at <= ?)";
+      const vals = [SM.claimableState, t];
       if (planId) (sql += " AND plan_id=?"), vals.push(planId);
       sql += " " + buildOrderBy(config.ordering);
       const candidates = db.prepare(sql).all(...vals);
       for (const item of candidates) {
         if (!depsSatisfied(item.plan_id, item.task_key)) continue;
+        const leaseId = uuid(); // fencing token: lo restituiamo, complete/heartbeat devono combaciare
         setItemStatus(item, SM.dispatchedState, {
           worker: worker ?? null,
           attempts: item.attempts + 1,
-          claim_expires_at: now() + visibilityTimeoutS,
+          claim_expires_at: t + visibilityTimeoutS,
+          next_eligible_at: null,
+          lease_id: leaseId,
         });
         emit(item.plan_id, item.id, "TASK_DISPATCHED", { taskKey: item.task_key, worker });
         return stmt.getItem.get(item.id);
@@ -333,20 +371,52 @@ function createStore(dbPath, config = DEFAULTS) {
       return null;
     },
 
-    complete({ itemId, status, result }) {
+    complete({ itemId, status, result, leaseId }) {
       const item = stmt.getItem.get(itemId);
       if (!item) throw new Error(`task non trovato: ${itemId}`);
-      if (TERMINAL.has(item.status)) return stmt.getItem.get(itemId);
+      if (TERMINAL.has(item.status)) return stmt.getItem.get(itemId); // idempotency guard
+      // fencing: un worker il cui lease è scaduto (task ripreso da altri) non può chiudere il dispatch
+      if (dflt.enforceLease && item.lease_id && leaseId !== item.lease_id) {
+        throw new Error(`lease non valido per ${item.task_key}: dispatch ripreso (worker stantio)`);
+      }
+      const DLQ = SM.deadLetterState || SM.failureState;
       const ok = status === "success" || status === true;
-      const next = ok ? SM.successState : SM.failureState;
-      const processScore = ok ? Math.max(0, 1 - 0.25 * (item.attempts - 1)) : 0;
-      setItemStatus(item, next, {
-        result: ok ? str(JSON.stringify(result ?? null), 100000) : null,
-        error: ok ? null : str(result ?? "failed", 2000),
-        process_score: processScore,
-        claim_expires_at: null,
-      });
-      emit(item.plan_id, item.id, ok ? "TASK_COMPLETED" : "TASK_FAILED", { taskKey: item.task_key, status: next });
+      if (ok) {
+        setItemStatus(item, SM.successState, {
+          result: str(JSON.stringify(result ?? null), 100000),
+          error: null,
+          process_score: Math.max(0, 1 - 0.25 * (item.attempts - 1)),
+          claim_expires_at: null,
+          next_eligible_at: null,
+          lease_id: null,
+        });
+        emit(item.plan_id, item.id, "TASK_COMPLETED", { taskKey: item.task_key, status: SM.successState });
+      } else if (item.attempts < item.max_attempts) {
+        // auto-retry: torna claimable dopo backoff esponenziale + jitter
+        const delay = backoffSeconds(item.attempts, dflt);
+        setItemStatus(item, SM.claimableState, {
+          error: str(result ?? "failed", 2000),
+          claim_expires_at: null,
+          lease_id: null,
+          next_eligible_at: now() + delay,
+        });
+        emit(item.plan_id, item.id, "TASK_RETRY_SCHEDULED", {
+          taskKey: item.task_key,
+          attempt: item.attempts,
+          maxAttempts: item.max_attempts,
+          retryInS: delay,
+        });
+      } else {
+        // tentativi esauriti → dead-letter (terminale, redrive manuale)
+        setItemStatus(item, DLQ, {
+          error: str(result ?? "failed", 2000),
+          process_score: 0,
+          claim_expires_at: null,
+          lease_id: null,
+          next_eligible_at: null,
+        });
+        emit(item.plan_id, item.id, "TASK_DEAD_LETTERED", { taskKey: item.task_key, attempts: item.attempts });
+      }
       checkPlanCompletion(item.plan_id);
       return stmt.getItem.get(itemId);
     },
@@ -354,7 +424,14 @@ function createStore(dbPath, config = DEFAULTS) {
     retry({ itemId }) {
       const item = stmt.getItem.get(itemId);
       if (!item) throw new Error(`task non trovato: ${itemId}`);
-      setItemStatus(item, SM.initial, { error: null, claim_expires_at: null });
+      // redrive manuale (da FAILED o DEAD_LETTER): tentativi azzerati, subito claimabile
+      setItemStatus(item, SM.claimableState, {
+        error: null,
+        attempts: 0,
+        claim_expires_at: null,
+        next_eligible_at: null,
+        lease_id: null,
+      });
       emit(item.plan_id, item.id, "TASK_RETRIED", { taskKey: item.task_key });
       const plan = stmt.getPlan.get(item.plan_id);
       if (plan && (plan.status === PS.failed || plan.status === PS.completed)) {
@@ -380,22 +457,47 @@ function createStore(dbPath, config = DEFAULTS) {
       return stmt.getItem.get(itemId);
     },
 
+    // reaper: i DISPATCHED con lease scaduto (worker morto) tornano in coda con backoff, o vanno in dead-letter
     sweepExpired() {
       const t = now();
+      const DLQ = SM.deadLetterState || SM.failureState;
       const expired = db
         .prepare("SELECT * FROM plan_items WHERE status=? AND claim_expires_at IS NOT NULL AND claim_expires_at < ?")
         .all(SM.dispatchedState, t);
       for (const item of expired) {
         if (item.attempts >= item.max_attempts) {
-          setItemStatus(item, SM.failureState, { error: "max attempts exceeded (visibility timeout)", claim_expires_at: null });
-          emit(item.plan_id, item.id, "TASK_FAILED", { taskKey: item.task_key, reason: "timeout" });
+          setItemStatus(item, DLQ, {
+            error: "visibility timeout: tentativi esauriti",
+            process_score: 0,
+            claim_expires_at: null,
+            lease_id: null,
+          });
+          emit(item.plan_id, item.id, "TASK_DEAD_LETTERED", { taskKey: item.task_key, reason: "timeout" });
           checkPlanCompletion(item.plan_id);
         } else {
-          setItemStatus(item, SM.initial, { claim_expires_at: null });
-          emit(item.plan_id, item.id, "TASK_REQUEUED", { taskKey: item.task_key });
+          const delay = backoffSeconds(item.attempts, dflt);
+          setItemStatus(item, SM.claimableState, {
+            claim_expires_at: null,
+            lease_id: null,
+            next_eligible_at: t + delay,
+          });
+          emit(item.plan_id, item.id, "TASK_REQUEUED", { taskKey: item.task_key, reason: "timeout", retryInS: delay });
         }
       }
       return expired.length;
+    },
+
+    // estende il lease di un task in corso (per task lunghi); richiede il lease_id del claim
+    heartbeat({ itemId, leaseId }) {
+      const item = stmt.getItem.get(itemId);
+      if (!item) throw new Error(`task non trovato: ${itemId}`);
+      if (item.status !== SM.dispatchedState) throw new Error(`heartbeat su task non in corso (${item.status})`);
+      if (dflt.enforceLease && item.lease_id && leaseId !== item.lease_id) {
+        throw new Error(`lease non valido per ${item.task_key}`);
+      }
+      // non è un cambio di stato: aggiorno solo il deadline del lease
+      db.prepare("UPDATE plan_items SET claim_expires_at=?, updated_at=? WHERE id=?").run(now() + visibilityTimeoutS, now(), item.id);
+      return stmt.getItem.get(itemId);
     },
 
     eventsSince({ planId, seq = 0 }) {
@@ -433,9 +535,23 @@ module.exports = { createStore, loadConfig, DEFAULTS };
 if (require.main === module) {
   const dbPath = process.argv[2] || process.env.TASKS_DB || "tasks.db";
   const configPath = process.argv[3] || process.env.TASKS_CONFIG || "";
-  const store = createStore(dbPath, loadConfig(configPath));
+  const cfg = loadConfig(configPath);
+  const store = createStore(dbPath, cfg);
   const out = (obj) => process.stdout.write(JSON.stringify(obj) + "\n");
   process.stderr.write(`[task-service] db=${dbPath} config=${configPath || "(default)"}\n`);
+
+  // reaper periodico: requeue/dead-letter dei DISPATCHED con lease scaduto (worker morti)
+  const reaperS = (cfg.defaults && cfg.defaults.reaperIntervalS) || 5;
+  const reaper = setInterval(() => {
+    try {
+      const n = store.sweepExpired();
+      if (n) process.stderr.write(`[task-service] reaper: ${n} task scaduti gestiti\n`);
+    } catch (e) {
+      process.stderr.write(`[task-service] reaper error: ${(e && e.message) || e}\n`);
+    }
+  }, reaperS * 1000);
+  if (reaper.unref) reaper.unref();
+
   out({ type: "ready" });
 
   let buf = "";

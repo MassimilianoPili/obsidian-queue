@@ -125,7 +125,9 @@ export class TasksServer {
         if (parts[0] === "tasks" && parts[1] && parts[2] && req.method === "POST") {
           const itemId = parts[1];
           const body = await readBody(req);
-          if (parts[2] === "complete") return send(200, await svc.complete({ itemId, status: body.status, result: body.result }));
+          if (parts[2] === "complete")
+            return send(200, await svc.complete({ itemId, status: body.status, result: body.result, leaseId: body.leaseId }));
+          if (parts[2] === "heartbeat") return send(200, await svc.heartbeat(itemId, body.leaseId));
           if (parts[2] === "retry") return send(200, await svc.retry(itemId));
           if (parts[2] === "approve") return send(200, await svc.approve(itemId));
           if (parts[2] === "reject") return send(200, await svc.reject(itemId, body.reason));

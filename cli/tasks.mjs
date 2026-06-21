@@ -91,9 +91,10 @@ USO
 COMANDI
   plan <spec.json>            Crea un piano da file JSON {spec, tasks:[...]} e lo avvia.
   list [status]               Elenca i task (opz. filtra per status: WAITING/DISPATCHED/DONE/FAILED/AWAITING_APPROVAL).
-  claim <worker>              Reclama il prossimo task pronto (→ DISPATCHED).
-  complete <id> <ok> [msg]    Chiude un task: ok = success|failed.
-  retry <id>                  FAILED → WAITING.
+  claim <worker>              Reclama il prossimo task pronto (→ DISPATCHED). Ritorna anche lease_id.
+  complete <id> <ok> [msg]    Chiude un task: ok = success|failed. Usa --lease <id> (fencing).
+  heartbeat <id> --lease <id> Estende il lease di un task in corso (task lunghi).
+  retry <id>                  Redrive da FAILED/DEAD_LETTER → WAITING (tentativi azzerati).
   approve <id>                AWAITING_APPROVAL → WAITING.
   reject <id> [reason]        AWAITING_APPROVAL → FAILED.
   plan-status <id>            Stato del piano + item.
@@ -106,6 +107,7 @@ COMANDI
   version | --version         Versione.
 
 OPZIONI
+  --lease <id>                Lease id (da 'claim') per complete/heartbeat (fencing).
   --port N                    Porta del server REST (default 8766).
   --key <bearer>              API key Bearer.
   --data <path>               Legge porta+key dal data.json del plugin.
@@ -152,7 +154,7 @@ const run = {
   },
   async complete() {
     const [id, ok, msg] = positionals();
-    if (!id || !ok) die("uso: tasks complete <id> success|failed [msg]");
+    if (!id || !ok) die("uso: tasks complete <id> success|failed [msg] [--lease <leaseId>]");
     let result = msg;
     try {
       result = msg ? JSON.parse(msg) : undefined;
@@ -162,7 +164,16 @@ const run = {
     out(await call(`/tasks/${id}/complete`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status: ok, result }),
+      body: JSON.stringify({ status: ok, result, leaseId: flag("--lease") }),
+    }));
+  },
+  async heartbeat() {
+    const [id] = positionals();
+    if (!id) die("uso: tasks heartbeat <id> [--lease <leaseId>]");
+    out(await call(`/tasks/${id}/heartbeat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ leaseId: flag("--lease") }),
     }));
   },
   async retry() {

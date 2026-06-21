@@ -111,8 +111,11 @@ export class TaskServiceClient {
   claimNext(args: { worker?: string; planId?: string } = {}) {
     return this.request("claimNext", args);
   }
-  complete(args: { itemId: string; status: string; result?: any }) {
+  complete(args: { itemId: string; status: string; result?: any; leaseId?: string }) {
     return this.request("complete", args);
+  }
+  heartbeat(itemId: string, leaseId?: string) {
+    return this.request("heartbeat", { itemId, leaseId });
   }
   retry(itemId: string) {
     return this.request("retry", { itemId });

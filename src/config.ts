@@ -20,13 +20,23 @@ export interface QueueConfig {
     dispatchedState: string;
     successState: string;
     failureState: string;
+    deadLetterState: string;
     terminalStates: string[];
     transitions: Record<string, string[]>;
   };
   planStates: { pending: string; running: string; completed: string; failed: string; paused: string };
   workerTypes: string[];
   ordering: OrderDef[];
-  defaults: { visibilityTimeoutS: number; priority: number; maxAttempts: number };
+  defaults: {
+    visibilityTimeoutS: number;
+    priority: number;
+    maxAttempts: number;
+    retryBaseS: number;
+    retryCapS: number;
+    retryJitterFrac: number;
+    enforceLease: boolean;
+    reaperIntervalS: number;
+  };
 }
 
 export const DEFAULT_CONFIG: QueueConfig = {
@@ -39,6 +49,7 @@ export const DEFAULT_CONFIG: QueueConfig = {
       { status: "DISPATCHED", label: "In corso" },
       { status: "DONE", label: "Completati" },
       { status: "FAILED", label: "Falliti" },
+      { status: "DEAD_LETTER", label: "Dead-letter" },
     ],
   },
   stateMachine: {
@@ -48,12 +59,14 @@ export const DEFAULT_CONFIG: QueueConfig = {
     dispatchedState: "DISPATCHED",
     successState: "DONE",
     failureState: "FAILED",
-    terminalStates: ["DONE", "FAILED"],
+    deadLetterState: "DEAD_LETTER",
+    terminalStates: ["DONE", "FAILED", "DEAD_LETTER"],
     transitions: {
       WAITING: ["DISPATCHED"],
-      DISPATCHED: ["DONE", "FAILED", "WAITING"],
+      DISPATCHED: ["DONE", "WAITING", "FAILED", "DEAD_LETTER"],
       AWAITING_APPROVAL: ["WAITING", "FAILED"],
       FAILED: ["WAITING"],
+      DEAD_LETTER: ["WAITING"],
       DONE: [],
     },
   },
@@ -63,7 +76,16 @@ export const DEFAULT_CONFIG: QueueConfig = {
     { field: "priority", dir: "ASC" },
     { field: "ordinal", dir: "ASC" },
   ],
-  defaults: { visibilityTimeoutS: 300, priority: 5, maxAttempts: 3 },
+  defaults: {
+    visibilityTimeoutS: 300,
+    priority: 5,
+    maxAttempts: 3,
+    retryBaseS: 5,
+    retryCapS: 600,
+    retryJitterFrac: 0.25,
+    enforceLease: true,
+    reaperIntervalS: 5,
+  },
 };
 
 function isObj(x: any): boolean {

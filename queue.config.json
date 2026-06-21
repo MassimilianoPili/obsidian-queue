@@ -22,6 +22,10 @@
       {
         "status": "FAILED",
         "label": "Falliti"
+      },
+      {
+        "status": "DEAD_LETTER",
+        "label": "Dead-letter"
       }
     ]
   },
@@ -32,9 +36,11 @@
     "dispatchedState": "DISPATCHED",
     "successState": "DONE",
     "failureState": "FAILED",
+    "deadLetterState": "DEAD_LETTER",
     "terminalStates": [
       "DONE",
-      "FAILED"
+      "FAILED",
+      "DEAD_LETTER"
     ],
     "transitions": {
       "WAITING": [
@@ -42,14 +48,18 @@
       ],
       "DISPATCHED": [
         "DONE",
+        "WAITING",
         "FAILED",
-        "WAITING"
+        "DEAD_LETTER"
       ],
       "AWAITING_APPROVAL": [
         "WAITING",
         "FAILED"
       ],
       "FAILED": [
+        "WAITING"
+      ],
+      "DEAD_LETTER": [
         "WAITING"
       ],
       "DONE": []
@@ -85,6 +95,11 @@
   "defaults": {
     "visibilityTimeoutS": 300,
     "priority": 5,
-    "maxAttempts": 3
+    "maxAttempts": 3,
+    "retryBaseS": 5,
+    "retryCapS": 600,
+    "retryJitterFrac": 0.25,
+    "enforceLease": true,
+    "reaperIntervalS": 5
   }
 }

@@ -10,16 +10,21 @@ worker fanno claim esplicito del prossimo task pronto.
 
 MACCHINA A STATI (item/task)
   WAITING ──claim──► DISPATCHED ──complete success──► DONE
-                              └──complete failed────► FAILED ──retry──► WAITING
+                              └──complete failed──► (auto-retry con backoff) WAITING … ──► DEAD_LETTER (tentativi esauriti)
   AWAITING_APPROVAL ──approve──► WAITING   |   ──reject──► FAILED
-- Un task è claimabile solo se è WAITING E tutte le sue dipendenze (dependsOn) sono DONE (DAG).
+  FAILED|DEAD_LETTER ──retry──► WAITING (redrive manuale, tentativi azzerati)
+- Un task è claimabile solo se è WAITING E tutte le dipendenze (dependsOn) sono DONE (DAG) E il backoff è scaduto.
 - I task con requireApproval partono in AWAITING_APPROVAL: vanno approvati prima di entrare in coda.
-- Visibility timeout: un DISPATCHED non completato torna in coda (o FAILED dopo max tentativi).
+- FENCING: 'claim' ritorna un lease_id; passalo a 'complete' e 'heartbeat'. Se il tuo lease è scaduto
+  (task ripreso da un altro worker) il complete viene rifiutato — non insistere.
+- Visibility timeout: un DISPATCHED non completato torna in coda da solo (auto-retry); per task lunghi
+  manda 'heartbeat' per estendere il lease. Esauriti i tentativi → DEAD_LETTER.
 
 TOOL (REST, Bearer <API key> tranne /health,/prompt,/tools · equivalenti CLI tra parentesi)
 - POST /v1/plans {spec, tasks:[{taskKey,title,workerType,dependsOn,requireApproval,priority}]}  (tasks plan <spec.json>)
-- POST /tasks/claim {worker}            → prossimo task pronto, passa a DISPATCHED                 (tasks claim <worker>)
-- POST /tasks/{id}/complete {status,result}  status=success|failed                                 (tasks complete <id> success|failed)
+- POST /tasks/claim {worker}            → prossimo task pronto, passa a DISPATCHED, ritorna lease_id  (tasks claim <worker>)
+- POST /tasks/{id}/complete {status,result,leaseId}  status=success|failed                          (tasks complete <id> success|failed --lease <id>)
+- POST /tasks/{id}/heartbeat {leaseId}  → estende il lease (task lunghi)                             (tasks heartbeat <id> --lease <id>)
 - POST /tasks/{id}/retry · /approve · /reject                                                       (tasks retry|approve|reject <id>)
 - GET  /plans/{id}            → stato piano + item                                                  (tasks plan-status <id>)
 - GET  /plans/{id}/graph?format=mermaid|json                                                        (tasks graph <id>)
@@ -70,8 +75,15 @@ export const AGENT_TOOLS: AgentTool[] = [
     params: { id: "task id", status: "success|failed", result: "json o messaggio" },
   },
   {
+    name: "heartbeat",
+    description: "Estende il lease di un task DISPATCHED (per task lunghi). Richiede il lease_id del claim.",
+    http: "POST /tasks/{id}/heartbeat {leaseId}",
+    cli: "tasks heartbeat <id> --lease <leaseId>",
+    params: { id: "task id", leaseId: "lease del claim" },
+  },
+  {
     name: "retry",
-    description: "Riporta un task FAILED in WAITING.",
+    description: "Redrive manuale: riporta un task FAILED o DEAD_LETTER in WAITING (tentativi azzerati).",
     http: "POST /tasks/{id}/retry",
     cli: "tasks retry <id>",
     params: { id: "task id" },
