@@ -26,7 +26,7 @@ export class TasksBoardView extends ItemView {
     return VIEW_TYPE_TASKS;
   }
   getDisplayText() {
-    return "Agent Tasks";
+    return "Agent Queue";
   }
   getIcon() {
     return "list-checks";

@@ -45,7 +45,7 @@ export default class AgentTasksPlugin extends Plugin {
     this.server = new TasksServer(this);
 
     this.registerView(VIEW_TYPE_TASKS, (leaf: WorkspaceLeaf) => new TasksBoardView(leaf, this));
-    this.addRibbonIcon("list-checks", "Agent Tasks", () => void this.activateView());
+    this.addRibbonIcon("list-checks", "Agent Queue", () => void this.activateView());
 
     this.addCommand({ id: "agent-tasks-open", name: "Apri board", callback: () => void this.activateView() });
     this.addCommand({
@@ -54,7 +54,7 @@ export default class AgentTasksPlugin extends Plugin {
       callback: async () => {
         try {
           const h = await this.svc.health();
-          new Notice(`Agent Tasks: ${h.tasks} task, ${h.plans} piani`);
+          new Notice(`Agent Queue: ${h.tasks} task, ${h.plans} piani`);
         } catch (e) {
           new Notice(`Errore: ${String((e as Error).message)}`);
         }
@@ -120,7 +120,7 @@ class AgentTasksSettingTab extends PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h3", { text: "Agent Tasks — coda e stati dei task" });
+    containerEl.createEl("h3", { text: "Agent Queue — coda e stati dei task" });
 
     new Setting(containerEl)
       .setName("Percorso di Node")

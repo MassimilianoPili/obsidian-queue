@@ -1,4 +1,4 @@
-// Server REST locale (127.0.0.1) del plugin Agent Tasks. Stessa coda della UI, interrogabile da
+// Server REST locale (127.0.0.1) del plugin Agent Queue. Stessa coda della UI, interrogabile da
 // Claude/CLI/altri agenti. Opt-in dalle impostazioni.
 // Sicurezza (loopback, dati privati): NIENTE CORS; validazione Host (anti DNS-rebinding); body cap +
 // timeout; API key Bearer richiesta su tutto tranne gli endpoint di discovery.
@@ -138,7 +138,7 @@ export class TasksServer {
     });
 
     this.server.on("error", (e: any) => {
-      console.error("Agent Tasks server error", e);
+      console.error("Agent Queue server error", e);
       this.server = null;
     });
     this.server.listen(port, "127.0.0.1");

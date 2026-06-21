@@ -2,7 +2,7 @@
 //  - server REST:  GET /prompt (text)  e  GET /tools (json)
 //  - CLI:          tasks prompt / tasks tools
 
-export const AGENT_PROMPT = `# Coda task agenti — "Agent Tasks" (Obsidian)
+export const AGENT_PROMPT = `# Coda task agenti — "Agent Queue" (Obsidian)
 
 Coordini il lavoro multi-agente tramite una CODA con MACCHINA A STATI (replica dell'agent-framework),
 persistita in SQLite locale ed esposta dal plugin Obsidian su 127.0.0.1. NON c'è auto-dispatch: i
