@@ -1,37 +1,109 @@
 #!/usr/bin/env node
-// Servizio off-process del plugin "Agent Tasks": possiede il file .db (node:sqlite) e implementa
-// la macchina a stati dei task degli agenti (replica dell'agent-framework su SOL) + una coda
-// stile honker (claim = UPDATE...RETURNING con visibility timeout) tutta in SQL.
+// Servizio off-process del plugin "Agent Queue": possiede il file .db (node:sqlite) e implementa
+// la macchina a stati dei task degli agenti + una coda stile honker (claim = UPDATE...RETURNING
+// con visibility timeout) tutta in SQL.
+//
+// TUTTO è configurabile da un queue.config.json (stati, transizioni, stato iniziale/claimable/
+// dispatched/terminale/approval/success/failure, tipi worker, etichette, default). Il path della
+// config è passato come 3° argomento (argv[3]); in assenza si usano i DEFAULTS.
 //
 // Perché off-process: lo SQLite di Obsidian/Electron NON è node:sqlite; serve il system node ≥22.5.
-// Protocollo: JSON-lines su stdin/stdout. Una riga in = una richiesta {id,cmd,args}; una riga out =
-// {id, ok, result} oppure {id, ok:false, error}. All'avvio emette {type:"ready"}. stdout è RISERVATO
-// al protocollo: ogni log va su stderr (l'ExperimentalWarning di node:sqlite finisce già su stderr).
+// Protocollo: JSON-lines su stdin/stdout. {id,cmd,args} → {id,ok,result} | {id,ok:false,error}.
+// stdout è RISERVATO al protocollo: ogni log va su stderr.
 
 "use strict";
 
 const { DatabaseSync } = require("node:sqlite");
 const crypto = require("node:crypto");
+const fs = require("node:fs");
 
-// ─── Stati e transizioni ──────────────────────────────────────────────────────
-const PlanStatus = { PENDING: "PENDING", RUNNING: "RUNNING", COMPLETED: "COMPLETED", FAILED: "FAILED", PAUSED: "PAUSED" };
-const ItemStatus = {
-  WAITING: "WAITING",
-  DISPATCHED: "DISPATCHED",
-  DONE: "DONE",
-  FAILED: "FAILED",
-  AWAITING_APPROVAL: "AWAITING_APPROVAL",
+// ─── Config di default (sovrascrivibile interamente da queue.config.json) ──────
+const DEFAULTS = {
+  labels: {
+    ribbon: "Agent Queue",
+    viewTitle: "Agent Queue",
+    columns: [
+      { status: "AWAITING_APPROVAL", label: "In approvazione" },
+      { status: "WAITING", label: "In coda" },
+      { status: "DISPATCHED", label: "In corso" },
+      { status: "DONE", label: "Completati" },
+      { status: "FAILED", label: "Falliti" },
+    ],
+  },
+  stateMachine: {
+    initial: "WAITING",
+    approvalState: "AWAITING_APPROVAL",
+    claimableState: "WAITING",
+    dispatchedState: "DISPATCHED",
+    successState: "DONE",
+    failureState: "FAILED",
+    terminalStates: ["DONE", "FAILED"],
+    transitions: {
+      WAITING: ["DISPATCHED"],
+      DISPATCHED: ["DONE", "FAILED", "WAITING"],
+      AWAITING_APPROVAL: ["WAITING", "FAILED"],
+      FAILED: ["WAITING"],
+      DONE: [],
+    },
+  },
+  planStates: { pending: "PENDING", running: "RUNNING", completed: "COMPLETED", failed: "FAILED", paused: "PAUSED" },
+  workerTypes: ["BE", "FE", "AI_TASK", "CONTRACT", "REVIEW", "CONTEXT_MANAGER", "SCHEMA_MANAGER", "HOOK_MANAGER"],
+  // ordine con cui claimNext sceglie il prossimo task pronto (campi da allowlist, dir ASC|DESC)
+  ordering: [
+    { field: "priority", dir: "ASC" },
+    { field: "ordinal", dir: "ASC" },
+  ],
+  defaults: { visibilityTimeoutS: 300, priority: 5, maxAttempts: 3 },
 };
 
-// transizioni LEGITTIME per gli item (qualsiasi altra → errore)
-const ITEM_TRANSITIONS = {
-  WAITING: ["DISPATCHED"],
-  DISPATCHED: ["DONE", "FAILED", "WAITING"], // WAITING = requeue (visibility scaduta)
-  AWAITING_APPROVAL: ["WAITING", "FAILED"],
-  FAILED: ["WAITING"], // retry
-  DONE: [],
-};
-const TERMINAL = new Set([ItemStatus.DONE, ItemStatus.FAILED]);
+// campi ammessi nell'ORDER BY (no input grezzo in SQL)
+const ORDER_FIELDS = new Set(["priority", "ordinal", "created_at", "updated_at", "attempts", "task_key"]);
+function buildOrderBy(ordering) {
+  const parts = (ordering || [])
+    .filter((o) => o && ORDER_FIELDS.has(o.field))
+    .map((o) => `${o.field} ${String(o.dir).toUpperCase() === "DESC" ? "DESC" : "ASC"}`);
+  return "ORDER BY " + (parts.length ? parts.join(", ") : "priority ASC, ordinal ASC");
+}
+
+function isObj(x) {
+  return x && typeof x === "object" && !Array.isArray(x);
+}
+function deepMerge(base, over) {
+  if (!isObj(over)) return base;
+  const out = Array.isArray(base) ? [...base] : { ...base };
+  for (const k of Object.keys(over)) {
+    out[k] = isObj(base[k]) && isObj(over[k]) ? deepMerge(base[k], over[k]) : over[k];
+  }
+  return out;
+}
+// i nomi di stato finiscono in un indice SQL: validali (defense-in-depth)
+const STATE_RE = /^[A-Z_][A-Z0-9_]*$/;
+function assertState(s, where) {
+  if (typeof s !== "string" || !STATE_RE.test(s)) throw new Error(`stato non valido (${where}): ${JSON.stringify(s)}`);
+  return s;
+}
+function validateConfig(c) {
+  const sm = c.stateMachine;
+  ["initial", "approvalState", "claimableState", "dispatchedState", "successState", "failureState"].forEach((k) =>
+    assertState(sm[k], `stateMachine.${k}`),
+  );
+  (sm.terminalStates || []).forEach((s) => assertState(s, "terminalStates"));
+  for (const [from, tos] of Object.entries(sm.transitions || {})) {
+    assertState(from, "transitions.from");
+    (tos || []).forEach((t) => assertState(t, `transitions[${from}]`));
+  }
+  Object.values(c.planStates || {}).forEach((s) => assertState(s, "planStates"));
+  return c;
+}
+function loadConfig(p) {
+  if (!p) return DEFAULTS;
+  try {
+    return validateConfig(deepMerge(DEFAULTS, JSON.parse(fs.readFileSync(p, "utf8"))));
+  } catch (e) {
+    process.stderr.write(`[task-service] config non valida (${p}): ${e.message} — uso i default\n`);
+    return DEFAULTS;
+  }
+}
 
 function now() {
   return Math.floor(Date.now() / 1000);
@@ -39,7 +111,6 @@ function now() {
 function uuid() {
   return crypto.randomUUID();
 }
-// sanificazione input: forza stringa e cap di lunghezza (evita payload abnormi)
 function str(v, max = 2000) {
   if (v == null) return "";
   return String(v).slice(0, max);
@@ -49,11 +120,9 @@ function intIn(v, def, lo, hi) {
   if (!Number.isFinite(n)) return def;
   return Math.min(hi, Math.max(lo, n));
 }
-// label sicura per il testo mermaid (no virgolette/parentesi/newline che romperebbero il diagramma)
 function mermaidLabel(v) {
   return str(v, 80).replace(/["\[\]{}()<>|]/g, " ").replace(/\s+/g, " ").trim();
 }
-// id nodo mermaid sicuro: solo alfanumerico e underscore
 function mermaidId(v) {
   return str(v, 40).replace(/[^A-Za-z0-9_]/g, "_") || "n";
 }
@@ -91,8 +160,6 @@ CREATE TABLE IF NOT EXISTS plan_items (
   updated_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_items_plan ON plan_items(plan_id);
--- indice parziale stile honker: solo gli item "in coda" (claimabili)
-CREATE INDEX IF NOT EXISTS idx_items_waiting ON plan_items(plan_id, priority, ordinal) WHERE status = 'WAITING';
 CREATE TABLE IF NOT EXISTS plan_item_deps (
   plan_id TEXT NOT NULL,
   task_key TEXT NOT NULL,
@@ -110,12 +177,22 @@ CREATE TABLE IF NOT EXISTS plan_event (
 CREATE INDEX IF NOT EXISTS idx_event_plan ON plan_event(plan_id, seq);
 `;
 
-function createStore(dbPath, opts = {}) {
-  const visibilityTimeoutS = opts.visibilityTimeoutS ?? 300;
+function createStore(dbPath, config = DEFAULTS) {
+  const SM = config.stateMachine;
+  const PS = config.planStates;
+  const TRANSITIONS = SM.transitions;
+  const TERMINAL = new Set(SM.terminalStates);
+  const visibilityTimeoutS = config.defaults.visibilityTimeoutS;
+  const dflt = config.defaults;
+
   const db = new DatabaseSync(dbPath);
   db.exec("PRAGMA journal_mode = WAL;");
   db.exec("PRAGMA foreign_keys = ON;");
   db.exec(SCHEMA);
+  // indice parziale sugli item claimabili: il nome stato è validato (STATE_RE) → safe nell'SQL
+  db.exec(
+    `CREATE INDEX IF NOT EXISTS idx_items_claimable ON plan_items(plan_id, priority, ordinal) WHERE status = '${SM.claimableState}';`,
+  );
 
   const stmt = {
     insPlan: db.prepare("INSERT INTO plans (id, spec, status, created_at) VALUES (?,?,?,?)"),
@@ -139,22 +216,19 @@ function createStore(dbPath, opts = {}) {
     stmt.insEvent.run(planId, itemId ?? null, type, payload ? JSON.stringify(payload) : null, now());
   }
 
-  // tutte le dipendenze (task_key) dell'item sono DONE?
   function depsSatisfied(planId, taskKey) {
     const deps = db.prepare("SELECT depends_on FROM plan_item_deps WHERE plan_id=? AND task_key=?").all(planId, taskKey);
     if (deps.length === 0) return true;
     for (const d of deps) {
       const row = db.prepare("SELECT status FROM plan_items WHERE plan_id=? AND task_key=?").get(planId, d.depends_on);
-      if (!row || row.status !== ItemStatus.DONE) return false;
+      if (!row || row.status !== SM.successState) return false;
     }
     return true;
   }
 
-  // colonne aggiornabili da setItemStatus: allowlist (i nomi colonna finiscono in SQL, mai input utente)
   const UPDATABLE = new Set(["worker", "attempts", "claim_expires_at", "result", "error", "process_score"]);
-
   function setItemStatus(item, next, extra = {}) {
-    const allowed = ITEM_TRANSITIONS[item.status] || [];
+    const allowed = TRANSITIONS[item.status] || [];
     if (!allowed.includes(next)) {
       throw new Error(`transizione illegale ${item.task_key}: ${item.status} → ${next}`);
     }
@@ -169,26 +243,28 @@ function createStore(dbPath, opts = {}) {
     db.prepare(`UPDATE plan_items SET ${cols.join(", ")} WHERE id=?`).run(...vals);
   }
 
-  // se tutti gli item sono terminali → chiudi il piano (FAILED se almeno uno FAILED, altrimenti COMPLETED)
   function checkPlanCompletion(planId) {
     const items = stmt.itemsByPlan.all(planId);
     if (items.length === 0) return;
-    const allTerminal = items.every((i) => TERMINAL.has(i.status));
-    if (!allTerminal) return;
-    const failed = items.filter((i) => i.status === ItemStatus.FAILED).length;
-    const status = failed > 0 ? PlanStatus.FAILED : PlanStatus.COMPLETED;
+    if (!items.every((i) => TERMINAL.has(i.status))) return;
+    const failed = items.filter((i) => i.status === SM.failureState).length;
+    const status = failed > 0 ? PS.failed : PS.completed;
     stmt.setPlanStatus.run(status, now(), planId);
     emit(planId, null, "PLAN_COMPLETED", { status, itemCount: items.length, failedCount: failed });
   }
 
   const api = {
+    config() {
+      return config;
+    },
+
     createPlan({ spec = "", tasks = [] }) {
       const planId = uuid();
       db.exec("BEGIN");
       try {
-        stmt.insPlan.run(planId, spec, PlanStatus.PENDING, now());
+        stmt.insPlan.run(planId, str(spec, 20000), PS.pending, now());
         tasks.forEach((t, idx) => {
-          const status = t.requireApproval ? ItemStatus.AWAITING_APPROVAL : ItemStatus.WAITING;
+          const status = t.requireApproval ? SM.approvalState : SM.initial;
           const taskKey = str(t.taskKey, 40) || `T-${String(idx + 1).padStart(3, "0")}`;
           stmt.insItem.run(
             uuid(),
@@ -200,16 +276,16 @@ function createStore(dbPath, opts = {}) {
             t.workerType ? str(t.workerType, 50) : null,
             t.workerProfile ? str(t.workerProfile, 50) : null,
             status,
-            intIn(t.priority, 5, 1, 10),
+            intIn(t.priority, dflt.priority, 1, 10),
             t.requireApproval ? 1 : 0,
-            intIn(t.maxAttempts, 3, 1, 100),
+            intIn(t.maxAttempts, dflt.maxAttempts, 1, 100),
             now(),
             now(),
           );
           for (const dep of t.dependsOn ?? []) stmt.insDep.run(planId, taskKey, str(dep, 40));
         });
-        stmt.setPlanStatus.run(PlanStatus.RUNNING, null, planId);
-        emit(planId, null, "PLAN_STARTED", { spec, itemCount: tasks.length });
+        stmt.setPlanStatus.run(PS.running, null, planId);
+        emit(planId, null, "PLAN_STARTED", { spec: str(spec, 500), itemCount: tasks.length });
         db.exec("COMMIT");
       } catch (e) {
         db.exec("ROLLBACK");
@@ -237,17 +313,16 @@ function createStore(dbPath, opts = {}) {
       return db.prepare(sql).all(...vals);
     },
 
-    // prossimo task pronto (WAITING + deps DONE), priorità poi ordinal → DISPATCHED
     claimNext({ worker, planId } = {}) {
       api.sweepExpired();
-      let sql = "SELECT * FROM plan_items WHERE status='WAITING'";
-      const vals = [];
+      let sql = "SELECT * FROM plan_items WHERE status=?";
+      const vals = [SM.claimableState];
       if (planId) (sql += " AND plan_id=?"), vals.push(planId);
-      sql += " ORDER BY priority ASC, ordinal ASC";
+      sql += " " + buildOrderBy(config.ordering);
       const candidates = db.prepare(sql).all(...vals);
       for (const item of candidates) {
         if (!depsSatisfied(item.plan_id, item.task_key)) continue;
-        setItemStatus(item, ItemStatus.DISPATCHED, {
+        setItemStatus(item, SM.dispatchedState, {
           worker: worker ?? null,
           attempts: item.attempts + 1,
           claim_expires_at: now() + visibilityTimeoutS,
@@ -261,10 +336,9 @@ function createStore(dbPath, opts = {}) {
     complete({ itemId, status, result }) {
       const item = stmt.getItem.get(itemId);
       if (!item) throw new Error(`task non trovato: ${itemId}`);
-      if (TERMINAL.has(item.status)) return stmt.getItem.get(itemId); // idempotency guard
+      if (TERMINAL.has(item.status)) return stmt.getItem.get(itemId);
       const ok = status === "success" || status === true;
-      const next = ok ? ItemStatus.DONE : ItemStatus.FAILED;
-      // process score deterministico: 1 al primo tentativo, decresce coi retry
+      const next = ok ? SM.successState : SM.failureState;
       const processScore = ok ? Math.max(0, 1 - 0.25 * (item.attempts - 1)) : 0;
       setItemStatus(item, next, {
         result: ok ? str(JSON.stringify(result ?? null), 100000) : null,
@@ -280,12 +354,11 @@ function createStore(dbPath, opts = {}) {
     retry({ itemId }) {
       const item = stmt.getItem.get(itemId);
       if (!item) throw new Error(`task non trovato: ${itemId}`);
-      setItemStatus(item, ItemStatus.WAITING, { error: null, claim_expires_at: null });
+      setItemStatus(item, SM.initial, { error: null, claim_expires_at: null });
       emit(item.plan_id, item.id, "TASK_RETRIED", { taskKey: item.task_key });
-      // se il piano era FAILED, riportalo RUNNING
       const plan = stmt.getPlan.get(item.plan_id);
-      if (plan && (plan.status === PlanStatus.FAILED || plan.status === PlanStatus.COMPLETED)) {
-        stmt.setPlanStatus.run(PlanStatus.RUNNING, null, item.plan_id);
+      if (plan && (plan.status === PS.failed || plan.status === PS.completed)) {
+        stmt.setPlanStatus.run(PS.running, null, item.plan_id);
       }
       return stmt.getItem.get(itemId);
     },
@@ -293,7 +366,7 @@ function createStore(dbPath, opts = {}) {
     approve({ itemId }) {
       const item = stmt.getItem.get(itemId);
       if (!item) throw new Error(`task non trovato: ${itemId}`);
-      setItemStatus(item, ItemStatus.WAITING);
+      setItemStatus(item, SM.initial);
       emit(item.plan_id, item.id, "TASK_APPROVED", { taskKey: item.task_key });
       return stmt.getItem.get(itemId);
     },
@@ -301,25 +374,24 @@ function createStore(dbPath, opts = {}) {
     reject({ itemId, reason }) {
       const item = stmt.getItem.get(itemId);
       if (!item) throw new Error(`task non trovato: ${itemId}`);
-      setItemStatus(item, ItemStatus.FAILED, { error: str(reason ?? "rejected", 2000) });
+      setItemStatus(item, SM.failureState, { error: str(reason ?? "rejected", 2000) });
       emit(item.plan_id, item.id, "TASK_REJECTED", { taskKey: item.task_key, reason: str(reason, 2000) });
       checkPlanCompletion(item.plan_id);
       return stmt.getItem.get(itemId);
     },
 
-    // requeue dei DISPATCHED con visibility scaduta (worker morto)
     sweepExpired() {
       const t = now();
       const expired = db
-        .prepare("SELECT * FROM plan_items WHERE status='DISPATCHED' AND claim_expires_at IS NOT NULL AND claim_expires_at < ?")
-        .all(t);
+        .prepare("SELECT * FROM plan_items WHERE status=? AND claim_expires_at IS NOT NULL AND claim_expires_at < ?")
+        .all(SM.dispatchedState, t);
       for (const item of expired) {
         if (item.attempts >= item.max_attempts) {
-          setItemStatus(item, ItemStatus.FAILED, { error: "max attempts exceeded (visibility timeout)", claim_expires_at: null });
+          setItemStatus(item, SM.failureState, { error: "max attempts exceeded (visibility timeout)", claim_expires_at: null });
           emit(item.plan_id, item.id, "TASK_FAILED", { taskKey: item.task_key, reason: "timeout" });
           checkPlanCompletion(item.plan_id);
         } else {
-          setItemStatus(item, ItemStatus.WAITING, { claim_expires_at: null });
+          setItemStatus(item, SM.initial, { claim_expires_at: null });
           emit(item.plan_id, item.id, "TASK_REQUEUED", { taskKey: item.task_key });
         }
       }
@@ -355,14 +427,15 @@ function createStore(dbPath, opts = {}) {
   return api;
 }
 
-module.exports = { createStore, PlanStatus, ItemStatus };
+module.exports = { createStore, loadConfig, DEFAULTS };
 
 // ─── Loop JSON-lines (solo se eseguito direttamente) ──────────────────────────
 if (require.main === module) {
   const dbPath = process.argv[2] || process.env.TASKS_DB || "tasks.db";
-  const store = createStore(dbPath);
+  const configPath = process.argv[3] || process.env.TASKS_CONFIG || "";
+  const store = createStore(dbPath, loadConfig(configPath));
   const out = (obj) => process.stdout.write(JSON.stringify(obj) + "\n");
-  process.stderr.write(`[task-service] db=${dbPath}\n`);
+  process.stderr.write(`[task-service] db=${dbPath} config=${configPath || "(default)"}\n`);
   out({ type: "ready" });
 
   let buf = "";

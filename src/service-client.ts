@@ -17,6 +17,7 @@ export class TaskServiceClient {
     private nodePath: string,
     private serviceScript: string,
     private dbPath: string,
+    private configPath: string = "",
     private log: LogFn = () => {},
   ) {}
 
@@ -32,7 +33,7 @@ export class TaskServiceClient {
     const path = require("path");
     if (!this.serviceScript) throw new Error("serviceScript non impostato");
     const cwd = path.dirname(this.serviceScript);
-    this.proc = cp.spawn(this.nodePath, [this.serviceScript, this.dbPath], {
+    this.proc = cp.spawn(this.nodePath, [this.serviceScript, this.dbPath, this.configPath], {
       cwd,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,

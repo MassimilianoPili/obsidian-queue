@@ -1,0 +1,90 @@
+{
+  "labels": {
+    "ribbon": "Agent Queue",
+    "viewTitle": "Agent Queue",
+    "columns": [
+      {
+        "status": "AWAITING_APPROVAL",
+        "label": "In approvazione"
+      },
+      {
+        "status": "WAITING",
+        "label": "In coda"
+      },
+      {
+        "status": "DISPATCHED",
+        "label": "In corso"
+      },
+      {
+        "status": "DONE",
+        "label": "Completati"
+      },
+      {
+        "status": "FAILED",
+        "label": "Falliti"
+      }
+    ]
+  },
+  "stateMachine": {
+    "initial": "WAITING",
+    "approvalState": "AWAITING_APPROVAL",
+    "claimableState": "WAITING",
+    "dispatchedState": "DISPATCHED",
+    "successState": "DONE",
+    "failureState": "FAILED",
+    "terminalStates": [
+      "DONE",
+      "FAILED"
+    ],
+    "transitions": {
+      "WAITING": [
+        "DISPATCHED"
+      ],
+      "DISPATCHED": [
+        "DONE",
+        "FAILED",
+        "WAITING"
+      ],
+      "AWAITING_APPROVAL": [
+        "WAITING",
+        "FAILED"
+      ],
+      "FAILED": [
+        "WAITING"
+      ],
+      "DONE": []
+    }
+  },
+  "planStates": {
+    "pending": "PENDING",
+    "running": "RUNNING",
+    "completed": "COMPLETED",
+    "failed": "FAILED",
+    "paused": "PAUSED"
+  },
+  "workerTypes": [
+    "BE",
+    "FE",
+    "AI_TASK",
+    "CONTRACT",
+    "REVIEW",
+    "CONTEXT_MANAGER",
+    "SCHEMA_MANAGER",
+    "HOOK_MANAGER"
+  ],
+  "ordering": [
+    {
+      "field": "priority",
+      "dir": "ASC"
+    },
+    {
+      "field": "ordinal",
+      "dir": "ASC"
+    }
+  ],
+  "defaults": {
+    "visibilityTimeoutS": 300,
+    "priority": 5,
+    "maxAttempts": 3
+  }
+}

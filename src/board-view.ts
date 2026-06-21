@@ -3,14 +3,6 @@ import type AgentTasksPlugin from "./main";
 
 export const VIEW_TYPE_TASKS = "agent-tasks-board";
 
-const COLUMNS: { status: string; label: string }[] = [
-  { status: "AWAITING_APPROVAL", label: "In approvazione" },
-  { status: "WAITING", label: "In coda" },
-  { status: "DISPATCHED", label: "In corso" },
-  { status: "DONE", label: "Completati" },
-  { status: "FAILED", label: "Falliti" },
-];
-
 export class TasksBoardView extends ItemView {
   private refreshTimer: number | null = null;
   private currentPlanId = "";
@@ -26,7 +18,7 @@ export class TasksBoardView extends ItemView {
     return VIEW_TYPE_TASKS;
   }
   getDisplayText() {
-    return "Agent Queue";
+    return this.plugin.config?.labels?.viewTitle || "Agent Queue";
   }
   getIcon() {
     return "list-checks";
@@ -78,7 +70,7 @@ export class TasksBoardView extends ItemView {
     const shown = this.currentPlanId ? tasks.filter((t) => t.plan_id === this.currentPlanId) : tasks;
 
     const board = root.createDiv({ cls: "at-board" });
-    for (const col of COLUMNS) {
+    for (const col of this.plugin.config.labels.columns) {
       const colEl = board.createDiv({ cls: "at-col" });
       const items = shown.filter((t) => t.status === col.status);
       colEl.createEl("h4", { text: `${col.label} (${items.length})` });
