@@ -1,5 +1,5 @@
 {
-  "name": "obsidian-agent-tasks",
+  "name": "obsidian-queue",
   "version": "0.1.0",
   "description": "Agent task queue + state machine for Obsidian (node:sqlite, REST + CLI, Kanban/DAG board)",
   "main": "main.js",

@@ -1,5 +1,5 @@
 {
-  "id": "obsidian-agent-tasks",
+  "id": "obsidian-queue",
   "name": "Agent Tasks",
   "version": "0.1.0",
   "minAppVersion": "1.5.0",

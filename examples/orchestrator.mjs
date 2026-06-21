@@ -11,7 +11,7 @@
 import { readFileSync } from "node:fs";
 
 const VAULT = "C:/NoCloud/Progetti/DC/llm-wiki/.obsidian/plugins";
-const TASKS = cfg(`${VAULT}/obsidian-agent-tasks/data.json`, 8766);
+const TASKS = cfg(`${VAULT}/obsidian-queue/data.json`, 8766);
 const RAG = cfg(`${VAULT}/obsidian-rag/data.json`, 8765);
 
 function cfg(dataPath, defPort) {
