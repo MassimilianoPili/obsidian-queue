@@ -1,5 +1,6 @@
 node_modules/
 main.js
+/task-service.cjs
 *.js.map
 data.json
 

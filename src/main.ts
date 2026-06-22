@@ -2,7 +2,7 @@ import { App, Plugin, PluginSettingTab, Setting, Notice, WorkspaceLeaf } from "o
 import { TaskServiceClient } from "./service-client";
 import { TasksServer } from "./server";
 import { TasksBoardView, VIEW_TYPE_TASKS } from "./board-view";
-import { AGENT_PROMPT } from "./prompt";
+import { QUEUE_PROMPT } from "./prompt";
 import { ensureConfig, writeDefaultConfig, QueueConfig } from "./config";
 
 interface AgentTasksSettings {
@@ -63,7 +63,7 @@ export default class AgentTasksPlugin extends Plugin {
       callback: async () => {
         try {
           const h = await this.svc.health();
-          new Notice(`Agent Queue: ${h.tasks} task, ${h.plans} piani`);
+          new Notice(`Task Queue: ${h.tasks} task, ${h.plans} piani`);
         } catch (e) {
           new Notice(`Errore: ${String((e as Error).message)}`);
         }
@@ -73,7 +73,7 @@ export default class AgentTasksPlugin extends Plugin {
       id: "agent-tasks-copy-prompt",
       name: "Copia prompt per agente",
       callback: async () => {
-        await navigator.clipboard.writeText(AGENT_PROMPT);
+        await navigator.clipboard.writeText(QUEUE_PROMPT);
         new Notice("Prompt copiato negli appunti");
       },
     });
@@ -116,6 +116,24 @@ export default class AgentTasksPlugin extends Plugin {
     this.server.stop();
     if (this.settings.enableServer) this.server.start(this.settings.serverPort, this.settings.serverApiKey);
   }
+
+  // piano demo arricchito: DAG con fan-out/fan-in, tag-routing, priorità, approvazione, budget
+  async createDemoPlan() {
+    await this.svc.createPlan({
+      spec: "piano demo — mostra DAG (fan-out/fan-in), tag-routing, priorità, approvazione e budget",
+      budget: { maxDispatches: 20 },
+      tasks: [
+        { taskKey: "CTX", title: "Raccolta contesto", workerType: "CONTEXT", priority: 2, tags: ["analysis"] },
+        { taskKey: "SCHEMA", title: "Design schema dati", workerType: "ARCH", priority: 3, dependsOn: ["CTX"], tags: ["analysis"] },
+        { taskKey: "BE", title: "Implementa backend", workerType: "BE", priority: 5, dependsOn: ["SCHEMA"], tags: ["backend"] },
+        { taskKey: "FE", title: "Implementa frontend", workerType: "FE", priority: 5, dependsOn: ["SCHEMA"], tags: ["frontend"] },
+        { taskKey: "TEST", title: "Test integrazione", workerType: "QA", priority: 4, dependsOn: ["BE", "FE"], tags: ["qa"] },
+        { taskKey: "DOCS", title: "Documentazione", workerType: "DOC", priority: 8, dependsOn: ["BE", "FE"] },
+        { taskKey: "REVIEW", title: "Review finale", workerType: "REVIEW", priority: 3, dependsOn: ["TEST", "DOCS"], requireApproval: true, tags: ["review"] },
+        { taskKey: "DEPLOY", title: "Deploy in produzione", workerType: "OPS", priority: 1, dependsOn: ["REVIEW"], tags: ["ops"] },
+      ],
+    });
+  }
 }
 
 class AgentTasksSettingTab extends PluginSettingTab {
@@ -129,11 +147,11 @@ class AgentTasksSettingTab extends PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h3", { text: "Agent Queue — coda e stati dei task" });
+    containerEl.createEl("h3", { text: "Task Queue — coda e stati dei task" });
 
     new Setting(containerEl)
       .setName("Percorso di Node")
-      .setDesc("Eseguibile node di sistema (≥22.5, per node:sqlite). Lascia 'node' se è nel PATH.")
+      .setDesc("Eseguibile node di sistema. Usa node:sqlite nativo se ≥22.5, altrimenti sql.js WASM. Lascia 'node' se è nel PATH.")
       .addText((t) =>
         t.setValue(this.plugin.settings.nodePath).onChange(async (v) => {
           this.plugin.settings.nodePath = v.trim() || "node";
@@ -182,6 +200,22 @@ class AgentTasksSettingTab extends PluginSettingTab {
         b.setButtonText("Rigenera").setWarning().onClick(() => {
           writeDefaultConfig(this.plugin.configPath);
           new Notice("queue.config.json rigenerato (ricarica il plugin per applicare)");
+        }),
+      );
+
+    new Setting(containerEl).setName("Strumenti").setHeading();
+
+    new Setting(containerEl)
+      .setName("Crea piano demo")
+      .setDesc("Inserisce un piano d'esempio (DAG con fan-out/fan-in, tag, priorità, approvazione, budget) per provare la coda.")
+      .addButton((b) =>
+        b.setButtonText("Crea piano demo").onClick(async () => {
+          try {
+            await this.plugin.createDemoPlan();
+            new Notice("piano demo creato");
+          } catch (e) {
+            new Notice(`Errore: ${String((e as Error).message)}`);
+          }
         }),
       );
 

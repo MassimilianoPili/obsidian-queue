@@ -1,9 +1,9 @@
 {
   "id": "obsidian-queue",
-  "name": "Agent Queue",
-  "version": "0.1.0",
+  "name": "Task Queue",
+  "version": "0.2.0",
   "minAppVersion": "1.5.0",
-  "description": "Coda e macchina a stati dei task degli agenti (replica Obsidian-native dell'agent-framework): storage SQLite locale via node:sqlite, board Kanban + DAG, esposti via REST e CLI. Niente cloud.",
+  "description": "Coda generica con macchina a stati, DAG di dipendenze, tag-routing, metrics (Little's law), priority aging, pause/resume, idempotency key. Storage SQLite locale, REST + CLI. Niente cloud.",
   "author": "Massimiliano Pili",
   "isDesktopOnly": true
 }

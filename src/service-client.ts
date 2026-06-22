@@ -99,7 +99,7 @@ export class TaskServiceClient {
   }
 
   // convenienze tipizzate
-  createPlan(args: { spec?: string; tasks: any[] }) {
+  createPlan(args: { spec?: string; tasks: any[]; idempotencyKey?: string; budget?: { maxDispatches?: number } }) {
     return this.request("createPlan", args);
   }
   getPlan(planId: string) {
@@ -108,11 +108,34 @@ export class TaskServiceClient {
   listTasks(args: { planId?: string; status?: string } = {}) {
     return this.request("listTasks", args);
   }
-  claimNext(args: { worker?: string; planId?: string } = {}) {
+  query(args: { sql: string; limit?: number }) {
+    return this.request("query", args);
+  }
+  updateTask(args: {
+    itemId: string;
+    title?: string;
+    description?: string;
+    priority?: number;
+    tags?: string[];
+    maxAttempts?: number;
+    workerType?: string;
+  }) {
+    return this.request("updateTask", args);
+  }
+  moveTask(args: { itemId: string; to: string }) {
+    return this.request("moveTask", args);
+  }
+  deleteTask(args: { itemId: string }) {
+    return this.request("deleteTask", args);
+  }
+  claimNext(args: { worker?: string; planId?: string; tags?: string[] } = {}) {
     return this.request("claimNext", args);
   }
   complete(args: { itemId: string; status: string; result?: any; leaseId?: string }) {
     return this.request("complete", args);
+  }
+  release(args: { itemId: string; leaseId?: string; delayS?: number; reason?: string }) {
+    return this.request("release", args);
   }
   heartbeat(itemId: string, leaseId?: string) {
     return this.request("heartbeat", { itemId, leaseId });
@@ -125,6 +148,15 @@ export class TaskServiceClient {
   }
   reject(itemId: string, reason?: string) {
     return this.request("reject", { itemId, reason });
+  }
+  pausePlan(planId: string) {
+    return this.request("pausePlan", { planId });
+  }
+  resumePlan(planId: string) {
+    return this.request("resumePlan", { planId });
+  }
+  metrics() {
+    return this.request("metrics", {});
   }
   graph(planId: string, format = "mermaid") {
     return this.request("graph", { planId, format });

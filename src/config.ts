@@ -1,7 +1,11 @@
 // Config totalmente esterna del plugin: un queue.config.json letto sia dalla UI (qui) sia dal
-// servizio off-process (task-service.cjs, che ha una copia speculare dei default come fallback).
-// main.ts garantisce che il file esista prima di avviare il servizio, così UI e servizio leggono
-// la STESSA configurazione.
+// servizio off-process (task-service.cjs, che ha una copia speculare della normalizzazione).
+//
+// SCHEMA CANONICO: ogni stato è definito UNA volta in `states` (label, color, transitions, role,
+// terminal, initial) e `order` dà l'ordine delle colonne. Da qui si DERIVANO le strutture interne
+// che il motore e la board già usano (stateMachine, labels.columns, statusColors) → niente drift.
+// Back-compat: i config vecchi (con labels.columns/statusColors/stateMachine e senza `states`)
+// continuano a caricarsi invariati.
 
 export interface ColumnDef {
   status: string;
@@ -11,8 +15,20 @@ export interface OrderDef {
   field: string; // priority | ordinal | created_at | updated_at | attempts | task_key
   dir: "ASC" | "DESC";
 }
+export type StateRole = "approval" | "claimable" | "dispatched" | "success" | "failure" | "deadLetter";
+export interface StateDef {
+  type: string; // nome dello stato (es. "WAITING")
+  order: number; // posizione della colonna
+  label: string;
+  color: string; // hex (#rrggbb): accento board + nodo DAG
+  transitions: string[]; // stati raggiungibili (genera i pulsanti "Sposta →")
+  role?: StateRole; // ruolo semantico per il motore
+  terminal?: boolean; // stato terminale
+  initial?: boolean; // stato iniziale dei task senza approvazione
+}
 export interface QueueConfig {
   labels: { ribbon: string; viewTitle: string; columns: ColumnDef[] };
+  states: StateDef[];
   stateMachine: {
     initial: string;
     approvalState: string;
@@ -25,7 +41,8 @@ export interface QueueConfig {
     transitions: Record<string, string[]>;
   };
   planStates: { pending: string; running: string; completed: string; failed: string; paused: string };
-  workerTypes: string[];
+  taskTypes: string[];
+  statusColors: Record<string, string>; // derivato da states[].color
   ordering: OrderDef[];
   defaults: {
     visibilityTimeoutS: number;
@@ -36,77 +53,29 @@ export interface QueueConfig {
     retryJitterFrac: number;
     enforceLease: boolean;
     reaperIntervalS: number;
+    maxWip: number;
+    agingIntervalS: number;
   };
 }
 
-export const DEFAULT_CONFIG: QueueConfig = {
-  labels: {
-    ribbon: "Agent Queue",
-    viewTitle: "Agent Queue",
-    columns: [
-      { status: "AWAITING_APPROVAL", label: "In approvazione" },
-      { status: "WAITING", label: "In coda" },
-      { status: "DISPATCHED", label: "In corso" },
-      { status: "DONE", label: "Completati" },
-      { status: "FAILED", label: "Falliti" },
-      { status: "DEAD_LETTER", label: "Dead-letter" },
-    ],
-  },
-  stateMachine: {
-    initial: "WAITING",
-    approvalState: "AWAITING_APPROVAL",
-    claimableState: "WAITING",
-    dispatchedState: "DISPATCHED",
-    successState: "DONE",
-    failureState: "FAILED",
-    deadLetterState: "DEAD_LETTER",
-    terminalStates: ["DONE", "FAILED", "DEAD_LETTER"],
-    transitions: {
-      WAITING: ["DISPATCHED"],
-      DISPATCHED: ["DONE", "WAITING", "FAILED", "DEAD_LETTER"],
-      AWAITING_APPROVAL: ["WAITING", "FAILED"],
-      FAILED: ["WAITING"],
-      DEAD_LETTER: ["WAITING"],
-      DONE: [],
-    },
-  },
-  planStates: { pending: "PENDING", running: "RUNNING", completed: "COMPLETED", failed: "FAILED", paused: "PAUSED" },
-  workerTypes: ["BE", "FE", "AI_TASK", "CONTRACT", "REVIEW", "CONTEXT_MANAGER", "SCHEMA_MANAGER", "HOOK_MANAGER"],
-  ordering: [
-    { field: "priority", dir: "ASC" },
-    { field: "ordinal", dir: "ASC" },
-  ],
-  defaults: {
-    visibilityTimeoutS: 300,
-    priority: 5,
-    maxAttempts: 3,
-    retryBaseS: 5,
-    retryCapS: 600,
-    retryJitterFrac: 0.25,
-    enforceLease: true,
-    reaperIntervalS: 5,
-  },
-};
-
-function isObj(x: any): boolean {
-  return x && typeof x === "object" && !Array.isArray(x);
+// logica canonica/derivazione condivisa col servizio (config-core.cjs) → niente duplicazione.
+interface ConfigCore {
+  DEFAULT_CANONICAL: any;
+  buildDefaults(): QueueConfig;
+  normalize(json: any, defaults: QueueConfig): QueueConfig;
 }
-function deepMerge(base: any, over: any): any {
-  if (!isObj(over)) return base;
-  const out: any = Array.isArray(base) ? [...base] : { ...base };
-  for (const k of Object.keys(over)) {
-    out[k] = isObj(base[k]) && isObj(over[k]) ? deepMerge(base[k], over[k]) : over[k];
-  }
-  return out;
-}
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const core: ConfigCore = require("./config-core.cjs");
 
-// crea il file di default se assente, poi legge e fonde con i default (campi mancanti = default)
+export const DEFAULT_CONFIG: QueueConfig = core.buildDefaults();
+
+// crea il file di default (schema canonico) se assente, poi legge, fonde e normalizza
 export function ensureConfig(path: string): QueueConfig {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const fs = require("fs");
   try {
-    if (!fs.existsSync(path)) fs.writeFileSync(path, JSON.stringify(DEFAULT_CONFIG, null, 2));
-    return deepMerge(DEFAULT_CONFIG, JSON.parse(fs.readFileSync(path, "utf8")));
+    if (!fs.existsSync(path)) fs.writeFileSync(path, JSON.stringify(core.DEFAULT_CANONICAL, null, 2));
+    return core.normalize(JSON.parse(fs.readFileSync(path, "utf8")), DEFAULT_CONFIG);
   } catch {
     return DEFAULT_CONFIG;
   }
@@ -115,5 +84,5 @@ export function ensureConfig(path: string): QueueConfig {
 export function writeDefaultConfig(path: string): void {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const fs = require("fs");
-  fs.writeFileSync(path, JSON.stringify(DEFAULT_CONFIG, null, 2));
+  fs.writeFileSync(path, JSON.stringify(core.DEFAULT_CANONICAL, null, 2));
 }

@@ -82,35 +82,45 @@ function out(o) {
   process.stdout.write((typeof o === "string" ? o : JSON.stringify(o, null, 2)) + "\n");
 }
 
-const VERSION = "0.1.0";
-const usage = `tasks — CLI della coda task del plugin Obsidian "Agent Tasks"  v${VERSION}
+const VERSION = "0.2.0";
+const usage = `tasks — CLI della coda task del plugin Obsidian "Task Queue"  v${VERSION}
 
 USO
   tasks <comando> [opzioni]
 
 COMANDI
-  plan <spec.json>            Crea un piano da file JSON {spec, tasks:[...]} e lo avvia.
-  list [status]               Elenca i task (opz. filtra per status: WAITING/DISPATCHED/DONE/FAILED/AWAITING_APPROVAL).
-  claim <worker>              Reclama il prossimo task pronto (→ DISPATCHED). Ritorna anche lease_id.
-  complete <id> <ok> [msg]    Chiude un task: ok = success|failed. Usa --lease <id> (fencing).
-  heartbeat <id> --lease <id> Estende il lease di un task in corso (task lunghi).
-  retry <id>                  Redrive da FAILED/DEAD_LETTER → WAITING (tentativi azzerati).
-  approve <id>                AWAITING_APPROVAL → WAITING.
-  reject <id> [reason]        AWAITING_APPROVAL → FAILED.
-  plan-status <id>            Stato del piano + item.
-  graph <id> [format]         DAG del piano (mermaid|json, default mermaid).
-  events <id> [sinceSeq]      Eventi del piano dal seq dato (default 0).
-  health                      Stato del server.
-  prompt                      Mini system-prompt per un agente.
-  tools                       Manifest tool (JSON).
-  help | -h | --help          Questo aiuto.
-  version | --version         Versione.
+  plan <spec.json>               Crea un piano da file JSON {spec, tasks:[...], idempotencyKey?, budget?} e lo avvia.
+  list [status]                  Elenca i task (opz. filtra per status: WAITING/DISPATCHED/DONE/FAILED/AWAITING_APPROVAL).
+  query <sql> [--limit N]        SQL read-only (solo SELECT/WITH) per ispezione/verifica del DB.
+  update <id> [opts]             Modifica i metadati di un task: --title --priority --tags a,b --max N --worker-type X.
+  move <id> <toStatus>           Sposta manualmente un task a uno stato (solo transizioni legali della config).
+  delete <id>                    Elimina un task dalla coda (rimuove anche gli archi DAG che lo referenziano).
+  claim <worker> [--tags a,b]    Reclama il prossimo task pronto (→ DISPATCHED). Ritorna anche lease_id.
+  complete <id> <ok> [msg]       Chiude un task: ok = success|failed. Usa --lease <id> (fencing).
+  release <id> --lease <id>      Rimette in coda senza penalità (manca contesto/risorse). --delay N (secondi).
+  heartbeat <id> --lease <id>    Estende il lease di un task in corso (task lunghi).
+  retry <id>                     Redrive da FAILED/DEAD_LETTER → WAITING (tentativi azzerati).
+  approve <id>                   AWAITING_APPROVAL → WAITING.
+  reject <id> [reason]           AWAITING_APPROVAL → FAILED.
+  pause <planId>                 Mette in pausa un piano (nessun nuovo dispatch).
+  resume <planId>                Riprende un piano PAUSED.
+  metrics                        Metriche di coda: wip, queueDepth, throughput, deadLetterCount.
+  plan-status <id>               Stato del piano + item.
+  graph <id> [format]            DAG del piano (mermaid|json, default mermaid).
+  events <id> [sinceSeq]         Eventi del piano dal seq dato (default 0).
+  health                         Stato del server.
+  prompt                         System-prompt per un worker.
+  tools                          Manifest tool (JSON).
+  help | -h | --help             Questo aiuto.
+  version | --version            Versione.
 
 OPZIONI
-  --lease <id>                Lease id (da 'claim') per complete/heartbeat (fencing).
-  --port N                    Porta del server REST (default 8766).
-  --key <bearer>              API key Bearer.
-  --data <path>               Legge porta+key dal data.json del plugin.
+  --lease <id>                   Lease id (da 'claim') per complete/release/heartbeat (fencing).
+  --delay N                      Secondi di backoff per 'release' (default 0).
+  --tags a,b,c                   Capacità del worker per 'claim' (tag routing).
+  --port N                       Porta del server REST (default 8766).
+  --key <bearer>                 API key Bearer.
+  --data <path>                  Legge porta+key dal data.json del plugin.
 
 CONFIG (precedenza: flag > env > file)
   env:   TASKS_PORT  TASKS_KEY  TASKS_DATA
@@ -118,8 +128,10 @@ CONFIG (precedenza: flag > env > file)
 ESEMPI
   tasks plan piano.json --data "$TASKS_DATA"
   tasks list WAITING --data "$TASKS_DATA"
-  tasks claim worker-1 --data "$TASKS_DATA"
-  tasks complete <id> success '{"files":3}' --data "$TASKS_DATA"`;
+  tasks claim worker-1 --tags gpu,fast --data "$TASKS_DATA"
+  tasks complete <id> success '{"files":3}' --lease <lid> --data "$TASKS_DATA"
+  tasks release <id> --lease <lid> --delay 30 --data "$TASKS_DATA"
+  tasks metrics --data "$TASKS_DATA"`;
 
 const run = {
   async plan() {
@@ -143,13 +155,54 @@ const run = {
     const qs = status ? `?status=${encodeURIComponent(status)}` : "";
     out(await call(`/tasks${qs}`));
   },
+  async query() {
+    const [sql] = positionals();
+    if (!sql) die("uso: tasks query <sql> [--limit N]");
+    out(await call("/query", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sql, limit: Number(flag("--limit")) || undefined }),
+    }));
+  },
+  async update() {
+    const [id] = positionals();
+    if (!id) die("uso: tasks update <id> [--title T] [--priority N] [--tags a,b] [--max N] [--worker-type X]");
+    const tagsRaw = flag("--tags");
+    const patch = {};
+    if (flag("--title") !== undefined) patch.title = flag("--title");
+    if (flag("--priority") !== undefined) patch.priority = Number(flag("--priority"));
+    if (flag("--max") !== undefined) patch.maxAttempts = Number(flag("--max"));
+    if (flag("--worker-type") !== undefined) patch.workerType = flag("--worker-type");
+    if (tagsRaw !== undefined) patch.tags = tagsRaw.split(",").map((t) => t.trim()).filter(Boolean);
+    out(await call(`/tasks/${id}/update`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    }));
+  },
+  async move() {
+    const [id, to] = positionals();
+    if (!id || !to) die("uso: tasks move <id> <toStatus>");
+    out(await call(`/tasks/${id}/move`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ to }),
+    }));
+  },
+  async delete() {
+    const [id] = positionals();
+    if (!id) die("uso: tasks delete <id>");
+    out(await call(`/tasks/${id}`, { method: "DELETE" }));
+  },
   async claim() {
     const [worker] = positionals();
     if (!worker) die("manca il worker: tasks claim <worker>");
+    const tagsRaw = flag("--tags");
+    const tags = tagsRaw ? tagsRaw.split(",").map((t) => t.trim()).filter(Boolean) : undefined;
     out(await call("/tasks/claim", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ worker }),
+      body: JSON.stringify({ worker, ...(tags ? { tags } : {}) }),
     }));
   },
   async complete() {
@@ -175,6 +228,28 @@ const run = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ leaseId: flag("--lease") }),
     }));
+  },
+  async release() {
+    const [id] = positionals();
+    if (!id) die("uso: tasks release <id> --lease <leaseId> [--delay N]");
+    out(await call(`/tasks/${id}/release`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ leaseId: flag("--lease"), delayS: Number(flag("--delay", "0")) || 0 }),
+    }));
+  },
+  async pause() {
+    const [id] = positionals();
+    if (!id) die("manca il planId: tasks pause <planId>");
+    out(await call(`/plans/${id}/pause`, { method: "POST" }));
+  },
+  async resume() {
+    const [id] = positionals();
+    if (!id) die("manca il planId: tasks resume <planId>");
+    out(await call(`/plans/${id}/resume`, { method: "POST" }));
+  },
+  async metrics() {
+    out(await call("/metrics"));
   },
   async retry() {
     const [id] = positionals();

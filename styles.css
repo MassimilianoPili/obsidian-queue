@@ -1,6 +1,11 @@
 .agent-tasks-root {
-  padding: 8px;
+  padding: 10px;
   overflow: auto;
+}
+
+/* ── chrome: toolbar + barra SQL ─────────────────────────────────────────── */
+.at-chrome {
+  margin-bottom: 12px;
 }
 .at-toolbar {
   display: flex;
@@ -8,58 +13,204 @@
   align-items: center;
   margin-bottom: 8px;
 }
+.at-sqlbar {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.at-sql-input {
+  flex: 1 1 auto;
+  font-family: var(--font-monospace);
+  font-size: 12px;
+}
+.at-sql-results {
+  max-height: 220px;
+  overflow: auto;
+  margin-bottom: 8px;
+}
+.at-sql-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+.at-sql-table {
+  border-collapse: collapse;
+  font-size: 11px;
+  width: 100%;
+}
+.at-sql-table th,
+.at-sql-table td {
+  border: 1px solid var(--background-modifier-border);
+  padding: 3px 7px;
+  text-align: left;
+  white-space: nowrap;
+}
+.at-sql-table th {
+  background: var(--background-secondary);
+  position: sticky;
+  top: 0;
+}
+
+/* ── board (kanban) ──────────────────────────────────────────────────────── */
 .at-board {
   display: flex;
-  gap: 8px;
+  gap: 10px;
   align-items: flex-start;
 }
 .at-col {
   flex: 1 1 0;
-  min-width: 140px;
+  min-width: 160px;
   background: var(--background-secondary);
-  border-radius: 6px;
-  padding: 6px;
+  border-radius: 8px;
+  padding: 8px;
 }
-.at-col h4 {
-  margin: 2px 0 8px;
-  font-size: 12px;
+.at-colhead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 2px 10px;
+  padding-bottom: 6px;
+  border-bottom: 2px solid var(--at-accent, var(--text-muted));
+}
+.at-collabel {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
-  opacity: 0.7;
+  color: var(--text-normal);
 }
+.at-count {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 600;
+  min-width: 20px;
+  text-align: center;
+  padding: 1px 7px;
+  border-radius: 10px;
+  color: var(--text-on-accent);
+  background: var(--at-accent, var(--text-muted));
+}
+.at-collist {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* ── card ────────────────────────────────────────────────────────────────── */
 .at-card {
+  position: relative;
   background: var(--background-primary);
   border: 1px solid var(--background-modifier-border);
-  border-radius: 6px;
-  padding: 6px 8px;
-  margin-bottom: 6px;
+  border-left: 3px solid var(--at-accent, var(--text-muted));
+  border-radius: 8px;
+  padding: 8px 10px;
+  cursor: context-menu;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+  transition: box-shadow 0.12s ease, transform 0.12s ease;
+}
+.at-card:hover {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+  transform: translateY(-1px);
+}
+.at-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 3px;
 }
 .at-key {
-  font-size: 11px;
-  opacity: 0.65;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+  font-family: var(--font-monospace);
+}
+.at-type {
+  margin-left: auto;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 1px 7px;
+  border-radius: 10px;
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+  border: 1px solid var(--background-modifier-border);
 }
 .at-title {
   font-weight: 600;
   font-size: 13px;
-  margin: 2px 0;
+  line-height: 1.25;
+  margin: 2px 0 6px;
+  color: var(--text-normal);
 }
 .at-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
   font-size: 11px;
-  opacity: 0.6;
+  color: var(--text-muted);
+}
+.at-mi {
+  white-space: nowrap;
+}
+.at-prio {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 600;
+}
+.at-prio .at-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.at-prio-hi .at-dot {
+  background: var(--color-red);
+}
+.at-prio-mid .at-dot {
+  background: var(--color-orange);
+}
+.at-prio-lo .at-dot {
+  background: var(--text-faint);
+}
+.at-tagwrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+.at-chip {
+  font-size: 10px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  background: var(--background-modifier-hover);
+  border: 1px solid var(--background-modifier-border);
+  color: var(--text-muted);
 }
 .at-error {
   font-size: 11px;
   color: var(--text-error);
-  margin-top: 2px;
+  margin-top: 4px;
+  word-break: break-word;
 }
 .at-actions {
   display: flex;
   gap: 4px;
-  margin-top: 6px;
+  margin-top: 8px;
 }
-.at-actions button {
+.at-more {
   font-size: 11px;
-  padding: 2px 8px;
+  padding: 3px 10px;
+  opacity: 0.75;
 }
+.at-card:hover .at-more {
+  opacity: 1;
+}
+
 .at-dag {
-  margin-top: 12px;
+  margin-top: 14px;
 }
